@@ -231,6 +231,13 @@ resolve_default_node_heap_mb() {
     printf '%s' "$heap_mb"
 }
 
+build_termux_client() (
+    # Vite needs more heap than the running server. The client's build script
+    # sets it for the build only (packages/client/scripts/build-heap.mjs), so the
+    # in-app updater gets it too; an explicit NODE_OPTIONS heap still wins.
+    MARINARA_LOW_MEMORY_BUILD=1 run_pnpm --filter @marinara-engine/client build
+)
+
 load_launcher_setting() {
     local setting_name="$1"
     local setting_value
@@ -260,6 +267,9 @@ if ! has_explicit_node_heap_limit; then
     NODE_OPTIONS="${NODE_OPTIONS:+${NODE_OPTIONS} }--max-old-space-size=${MARINARA_TERMUX_HEAP_MB}"
     export NODE_OPTIONS
     echo "  [OK] Node.js heap limit set to ${MARINARA_TERMUX_HEAP_MB} MiB for this profile and device"
+else
+    # Tells the client build (and the in-app updater's) to keep the user's heap.
+    export MARINARA_EXPLICIT_NODE_HEAP=1
 fi
 
 # Resident chat cap (#5592): evict clean LRU chats from memory past this. 0 = off.
@@ -589,17 +599,17 @@ if [ ! -f "packages/server/dist/index.js" ]; then
     echo "  [..] Building server..."
     run_pnpm --filter @marinara-engine/server build
 fi
-if [ ! -f "packages/client/dist/index.html" ]; then
-    echo "  [..] Building client..."
+if ! node scripts/check-client-build.mjs; then
+    echo "  [..] Rebuilding incomplete client assets..."
     # Skip tsc type-check on Termux — it OOMs on low-memory devices.
     # Skip PWA service worker — terser minifier OOMs on low-memory devices.
     # Vite doesn't need tsc output (tsconfig has noEmit: true).
-    if ! SKIP_PWA=1 run_pnpm --filter @marinara-engine/client exec vite build 2>&1; then
-        echo "  [WARN] Vite build failed — native binaries may not match Node.js $(node -v)."
-        echo "  [..] Ensuring WASM fallback for rollup is installed and retrying..."
+    if ! build_termux_client 2>&1; then
+        echo "  [WARN] Vite build failed. Checking build dependencies before one retry..."
         run_pnpm install --frozen-lockfile --prefer-offline --filter @marinara-engine/client 2>/dev/null || true
-        SKIP_PWA=1 run_pnpm --filter @marinara-engine/client exec vite build
+        build_termux_client
     fi
+    node scripts/check-client-build.mjs
 fi
 
 export NODE_ENV=production
